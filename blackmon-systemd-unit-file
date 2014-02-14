@@ -1,0 +1,13 @@
+[Unit]
+Description=BlackMon FAN Daemon
+#After=network.target mysqld.service
+
+[Service]
+Type=forking
+ExecStart=/usr/bin/perl -I/etc/perl /usr/local/bin/blackmon
+PIDFile=/var/run/blackmon.pid
+User=root
+StandardOutput=syslog
+
+[Install]
+WantedBy=multi-user.target

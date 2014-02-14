@@ -1,0 +1,130 @@
+#!/usr/bin/env perl
+#
+# program:	dell inspiron BlackMon fan daemon
+# author:	daniel stavrovski <d@stavrovski.net>
+#
+# set-up:
+#
+#	init script => <URL>
+#
+$0='blackmon'; # prog-name
+use warnings;
+use strict;
+use ViruSzZ::BlackMon;
+# -------------------------------- CONFIG --------------------------------- #
+#
+my $cpu_temp_low    =  50;  # sets fan speed to 1 if greater than this
+my $cpu_temp_high   =  60;  # sets fan speed to 2 if greater than this
+my $cpu_temp_crit	=  70;	# sets fan speed to 2 until temp is normalized
+my $poll_interval	=	5;	# polling interval in seconds
+my $notify			=	1;	# [1->on 0->off] audio notifications via espeak
+#### ------------------------------ PATHS ------------------------------ ####
+my $log_dir			=  '/var/log/blackmon/'; # closing slash is required
+## espeak binary path, not relevant if $notify is set to 0 (zero)
+my $espeakBin		=  '/usr/bin/espeak';
+my $homedir         =  '/'; # chdir to given dir
+my $ppidfile        =  '/var/run/'.$0.'.pid';
+#
+# ------------------------------ END CONFIG ------------------------------- #
+#
+# ----------------------------- PRE-REQ CHECK ----------------------------- #
+die("\nERROR: $log_dir does not exist. try:\n
+ mkdir -p $log_dir; chown <BLACKMON_USER>: $log_dir;\n\n") if(! -e $log_dir);
+if($notify==1) {
+	die("\nERROR: $espeakBin does not exist or is not executable\n\n")
+		if(! -e $espeakBin || ! -x $espeakBin);
+}
+# ----------------------------- MAIN PROGRAM ------------------------------ #
+daemonize($homedir, $ppidfile);
+my $offset = 3;	# offset of the temp being lower or higher (3==perfect)
+my $p = BlackMon->new();
+my $espeak = 0 if($notify==1);
+
+$SIG{INT} = $SIG{TERM} = $SIG{HUP} = \&sigHandler;
+logger("INFO:Daemon is starting up.");
+
+while(1) {
+	my $s = $p->fetch();
+	## critical mode triggered?
+	if($s->{cpu_temp} >= $cpu_temp_crit)
+	{
+		my $q = $p->fetch();
+		logger("CPU_TEMP:$q->{cpu_temp}\nFAN_MODE:$q->{right_fan_mode}\nFAN_RPM:$q->{right_fan_rpm}");
+		system("$espeakBin -p 48 -a 170 -k20 'CPU HEAT is CRITICAL'") if($notify==1 && $espeak < 3);
+			if($q->{right_fan_mode} == 2) { sleep(30); }
+			else { $p->set("fan_speed" => "max"); sleep(20); }
+		$espeak++ if($notify==1);
+	}
+	else
+	{
+		$espeak = 0 if($notify==1);
+		## let the flow begin ;)
+		if($s->{cpu_temp} > $cpu_temp_high || ($s->{cpu_temp} - $offset) > ($cpu_temp_low + $offset))
+		{
+			my $q = $p->fetch();
+				if($q->{right_fan_mode} == 2) { sleep(5); }
+				else { $p->set("fan_speed" => "max"); sleep(15); }
+			$s = $p->fetch();
+				my $tTemp = $s->{cpu_temp} - $offset;
+				$p->set("fan_speed" => "min") if($tTemp <= $cpu_temp_low + 1);
+		}
+		elsif($s->{cpu_temp} > $cpu_temp_low)
+		{
+			my $q = $p->fetch();
+				if($q->{right_fan_mode} == 1) {	sleep(5); }
+				else { $p->set("fan_speed" => "min"); sleep(5);	}
+			$s = $p->fetch();
+				my $tTemp = $s->{cpu_temp} + 1;
+				$p->set("fan_speed" => "max") if($tTemp > $cpu_temp_high);
+		}
+		else
+		{
+			my $q = $p->fetch();
+				if($q->{right_fan_mode} == 0) { sleep(10); }
+				else { $p->set("fan_speed" => "off"); sleep(5); }
+			$s = $p->fetch();
+			my $tTemp = $s->{cpu_temp} - $offset;
+			$p->set("fan_speed" => "min") if($tTemp > $cpu_temp_low);
+		}
+	}
+	sleep($poll_interval);
+}
+# ------------------------------ SUBROUTINES ------------------------------ #
+sub daemonize {
+    my ($chdir,$pidfile) = @_;
+    chdir($chdir) or die("\ncannot chdir to $chdir: $!\n\n");
+    defined(my $cpid = fork) or die("\ncannot fork: $!\n\n");
+    exit if $cpid; umask 027; #Set file permissions 750
+    close(STDIN); close(STDOUT); close(STDERR);
+    open(FILE,">$pidfile") or die("\ncannot open for writing $pidfile: $!\n\n");
+        print FILE $$;
+    close(FILE);
+}
+sub logger {
+    ## example: /var/log/blackmon/8-11-2013.log
+    my $s = shift;
+    my ($logsec,$logmin,$loghour,$logmday,$logmon,$logyear,
+    		$logwday,$logyday,$logisdst) = localtime(time);
+    $logyear = $logyear+1900;
+    my $logtimestamp = sprintf("DATE: %4d-%02d-%02d %02d:%02d:%02d",
+    		$logyear,$logmon+1,$logmday,$loghour,$logmin,$logsec);
+    $logmon++;
+    my $logfile="$log_dir$logmon-$logmday-$logyear.log";
+    my $fh; my $deli = q[x] x 28; my $deli2 = q[^] x 28;
+    open($fh, '>>', "$logfile") or warn "$logfile: $!";
+    print $fh "$deli\n$logtimestamp\n$deli2\n$s\n\n";
+    close($fh);
+}
+sub sigHandler
+{
+    my $signal = shift;
+    if($signal == "HUP" || $signal == "TERM" 
+    	|| $signal == "ABRT" || $signal == "QUIT") {
+    	## ensure fan is at max speed and clean up
+    	logger("INFO:Received $signal signal.Shutting down!");
+    	$p->set("fan_speed" => "max"); exit(0);
+    }
+    # ignore termination from ^C
+    elsif($signal == "INT") { }
+    else { logger("INFO:Unhandled signal '$signal'"); }
+}
